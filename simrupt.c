@@ -168,11 +168,49 @@ static void simrupt_work_func(struct work_struct *w)
 
         /* Store data to the kfifo buffer */
         mutex_lock(&producer_lock);
-        produce_data(val);
+        // produce_data(val);
+        produce_data(68);
         mutex_unlock(&producer_lock);
     }
     wake_up_interruptible(&rx_wait);
 }
+
+/* Workqueue handler: executed by a kernel thread */
+static void simrupt_work_func2(struct work_struct *w)
+{
+    int val, cpu;
+
+    /* This code runs from a kernel thread, so softirqs and hard-irqs must
+     * be enabled.
+     */
+    WARN_ON_ONCE(in_softirq());
+    WARN_ON_ONCE(in_interrupt());
+
+    /* Pretend to simulate access to per-CPU data, disabling preemption
+     * during the pr_info().
+     */
+    cpu = get_cpu();
+    pr_info("simrupt: [CPU#%d] %s\n", cpu, __func__);
+    put_cpu();
+
+    while (1) {
+        /* Consume data from the circular buffer */
+        mutex_lock(&consumer_lock);
+        val = fast_buf_get();
+        mutex_unlock(&consumer_lock);
+
+        if (val < 0)
+            break;
+
+        /* Store data to the kfifo buffer */
+        mutex_lock(&producer_lock);
+        // produce_data(val);
+        produce_data(67);
+        mutex_unlock(&producer_lock);
+    }
+    wake_up_interruptible(&rx_wait);
+}
+
 
 /* Workqueue for asynchronous bottom-half processing */
 static struct workqueue_struct *simrupt_workqueue;
@@ -180,7 +218,9 @@ static struct workqueue_struct *simrupt_workqueue;
 /* Work item: holds a pointer to the function that is going to be executed
  * asynchronously.
  */
+static bool sel_work = false;
 static DECLARE_WORK(work, simrupt_work_func);
+static DECLARE_WORK(work2, simrupt_work_func2);
 
 /* Tasklet handler.
  *
@@ -197,7 +237,13 @@ static void simrupt_tasklet_func(unsigned long __data)
     WARN_ON_ONCE(!in_softirq());
 
     tv_start = ktime_get();
-    queue_work(simrupt_workqueue, &work);
+    if (sel_work) {
+        queue_work(simrupt_workqueue, &work);
+        sel_work = false;
+    } else {
+        queue_work(simrupt_workqueue, &work2);
+        sel_work = true;
+    }
     tv_end = ktime_get();
 
     nsecs = (s64) ktime_to_ns(ktime_sub(tv_end, tv_start));
