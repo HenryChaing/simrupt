@@ -1,0 +1,10 @@
+{
+    "files.associations": {
+        "negamax.h": "c",
+        "game.h": "c",
+        "mt19937-64.h": "c",
+        "kernel.h": "c",
+        "module.h": "c",
+        "zobrist.h": "c"
+    }
+}

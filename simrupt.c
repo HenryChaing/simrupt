@@ -6,9 +6,14 @@
 #include <linux/interrupt.h>
 #include <linux/kfifo.h>
 #include <linux/module.h>
-#include <linux/slab.h>
+#include <linux/vmalloc.h>
 #include <linux/version.h>
 #include <linux/workqueue.h>
+
+#include "game.h"
+#include "negamax.h"
+#include "util.h"
+#include "zobrist.h"
 
 MODULE_LICENSE("Dual MIT/GPL");
 MODULE_AUTHOR("National Cheng Kung University, Taiwan");
@@ -21,7 +26,7 @@ MODULE_DESCRIPTION("A device that simulates interrupts");
 #define DECLARE_TASKLET_OLD(arg1, arg2) DECLARE_TASKLET(arg1, arg2, 0L)
 #endif
 
-#define DEV_NAME "simrupt"
+#define DEV_NAME "simrupt3"
 
 #define NR_SIMRUPT 1
 
@@ -32,11 +37,25 @@ static int simrupt_data;
 
 /* Timer to simulate a periodic IRQ */
 static struct timer_list timer;
+static bool sel_work = false;
 
 /* Character device stuff */
 static int major;
 static struct class *simrupt_class;
 static struct cdev simrupt_cdev;
+
+/*ttt game static data*/
+static int move_record[N_GRIDS];
+static int move_count = 0;
+static char table[N_GRIDS];
+static char turn = 'X';
+static char ai = 'O';
+
+/*ttt game static method*/
+static void record_move(int move)
+{
+    move_record[move_count++] = move;
+}
 
 /* Data are stored into a kfifo buffer before passing them to the userspace */
 static DECLARE_KFIFO_PTR(rx_fifo, unsigned char);
@@ -168,8 +187,21 @@ static void simrupt_work_func(struct work_struct *w)
 
         /* Store data to the kfifo buffer */
         mutex_lock(&producer_lock);
-        // produce_data(val);
-        produce_data(68);
+        char win = check_win(table);
+        if (win == 'D') {
+            pr_info("It is a draw!\n");
+        } else if (win != ' ') {
+            pr_info("%c won!\n", win);
+        } else {
+            pr_info("simrupt: [negamax] \n");
+            int move = negamax_predict(table, ai).move;
+            if (move != -1) {
+                table[move] = ai;
+                record_move(move);
+            }
+            produce_data('0' + move);
+        }
+        
         mutex_unlock(&producer_lock);
     }
     wake_up_interruptible(&rx_wait);
@@ -204,8 +236,21 @@ static void simrupt_work_func2(struct work_struct *w)
 
         /* Store data to the kfifo buffer */
         mutex_lock(&producer_lock);
-        // produce_data(val);
-        produce_data(67);
+        char win = check_win(table);
+        if (win == 'D') {
+            pr_info("It is a draw!\n");
+        } else if (win != ' ') {
+            pr_info("%c won!\n", win);
+        } else {
+            pr_info("simrupt: [negamax] \n");
+            int move = negamax_predict(table, turn).move;
+            if (move != -1) {
+                table[move] = turn;
+                record_move(move);
+            }
+            produce_data('0' + move);
+        }
+        
         mutex_unlock(&producer_lock);
     }
     wake_up_interruptible(&rx_wait);
@@ -218,7 +263,7 @@ static struct workqueue_struct *simrupt_workqueue;
 /* Work item: holds a pointer to the function that is going to be executed
  * asynchronously.
  */
-static bool sel_work = false;
+
 static DECLARE_WORK(work, simrupt_work_func);
 static DECLARE_WORK(work2, simrupt_work_func2);
 
@@ -421,6 +466,10 @@ static int __init simrupt_init(void)
     /* Setup the timer */
     timer_setup(&timer, timer_handler, 0);
     atomic_set(&open_cnt, 0);
+
+    /* ttt game initial */
+    memset(table, ' ', N_GRIDS);
+    negamax_init();
 
     pr_info("simrupt: registered new simrupt device: %d,%d\n", major, 0);
 out:
