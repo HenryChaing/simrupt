@@ -9,11 +9,13 @@
 #include <linux/vmalloc.h>
 #include <linux/version.h>
 #include <linux/workqueue.h>
+#include <linux/delay.h>
 
 #include "game.h"
 #include "negamax.h"
 #include "util.h"
 #include "zobrist.h"
+#include "chardev.h"
 
 MODULE_LICENSE("Dual MIT/GPL");
 MODULE_AUTHOR("National Cheng Kung University, Taiwan");
@@ -37,7 +39,8 @@ static int simrupt_data;
 
 /* Timer to simulate a periodic IRQ */
 static struct timer_list timer;
-static bool sel_work = false;
+static bool sel_work = true;
+static int work_count = 0;
 
 /* Character device stuff */
 static int major;
@@ -50,6 +53,9 @@ static int move_count = 0;
 static char table[N_GRIDS];
 static char turn = 'X';
 static char ai = 'O';
+static int baker1 = 1;
+static int baker2 = 2;
+static int bake_serve = 1;
 
 /*ttt game static method*/
 static void record_move(int move)
@@ -92,76 +98,25 @@ static void produce_data(unsigned char val)
 
 /* Mutex to serialize kfifo writers within the workqueue handler */
 static DEFINE_MUTEX(producer_lock);
-
-/* Mutex to serialize fast_buf consumers: we can use a mutex because consumers
- * run in workqueue handler (kernel thread context).
- */
-static DEFINE_MUTEX(consumer_lock);
-
-/* We use an additional "faster" circular buffer to quickly store data from
- * interrupt context, before adding them to the kfifo.
- */
-static struct circ_buf fast_buf;
-
-static int fast_buf_get(void)
-{
-    struct circ_buf *ring = &fast_buf;
-
-    /* prevent the compiler from merging or refetching accesses for tail */
-    unsigned long head = READ_ONCE(ring->head), tail = ring->tail;
-    int ret;
-
-    if (unlikely(!CIRC_CNT(head, tail, PAGE_SIZE)))
-        return -ENOENT;
-
-    /* read index before reading contents at that index */
-    smp_rmb();
-
-    /* extract item from the buffer */
-    ret = ring->buf[tail];
-
-    /* finish reading descriptor before incrementing tail */
-    smp_mb();
-
-    /* increment the tail pointer */
-    ring->tail = (tail + 1) & (PAGE_SIZE - 1);
-
-    return ret;
-}
-
-static int fast_buf_put(unsigned char val)
-{
-    struct circ_buf *ring = &fast_buf;
-    unsigned long head = ring->head;
-
-    /* prevent the compiler from merging or refetching accesses for tail */
-    unsigned long tail = READ_ONCE(ring->tail);
-
-    /* is circular buffer full? */
-    if (unlikely(!CIRC_SPACE(head, tail, PAGE_SIZE)))
-        return -ENOMEM;
-
-    ring->buf[ring->head] = val;
-
-    /* commit the item before incrementing the head */
-    smp_wmb();
-
-    /* update header pointer */
-    ring->head = (ring->head + 1) & (PAGE_SIZE - 1);
-
-    return 0;
-}
-
-/* Clear all data from the circular buffer fast_buf */
-static void fast_buf_clear(void)
-{
-    fast_buf.head = fast_buf.tail = 0;
-}
+static DEFINE_MUTEX(baker1_lock);
+static DEFINE_MUTEX(baker2_lock);
+static DEFINE_MUTEX(baker_serv_lock);
 
 /* Workqueue handler: executed by a kernel thread */
 static void simrupt_work_func(struct work_struct *w)
 {
-    int val, cpu;
+    int cpu, number;
+
+    mutex_lock(&baker1_lock);
+    number = baker1;
+    baker1 += 2;
+    mutex_unlock(&baker1_lock);
+    mutex_lock(&baker_serv_lock);
+    while(number != bake_serve){
+        ssleep(1);
+    }
+    bake_serve++;
+    mutex_unlock(&baker_serv_lock);
 
     /* This code runs from a kernel thread, so softirqs and hard-irqs must
      * be enabled.
@@ -177,13 +132,6 @@ static void simrupt_work_func(struct work_struct *w)
     put_cpu();
 
     while (1) {
-        /* Consume data from the circular buffer */
-        mutex_lock(&consumer_lock);
-        val = fast_buf_get();
-        mutex_unlock(&consumer_lock);
-
-        if (val < 0)
-            break;
 
         /* Store data to the kfifo buffer */
         mutex_lock(&producer_lock);
@@ -193,14 +141,18 @@ static void simrupt_work_func(struct work_struct *w)
         } else if (win != ' ') {
             pr_info("%c won!\n", win);
         } else {
-            pr_info("simrupt: [negamax] \n");
+
             int move = negamax_predict(table, ai).move;
-            if (move != -1) {
+            
+            if (move != -1 ) {
+                produce_data('0' + move);
                 table[move] = ai;
                 record_move(move);
             }
-            produce_data('0' + move);
+            pr_info("simrupt: [negamax] %d, %c\n",move,ai);
+            
         }
+        ssleep(2);
         
         mutex_unlock(&producer_lock);
     }
@@ -210,7 +162,18 @@ static void simrupt_work_func(struct work_struct *w)
 /* Workqueue handler: executed by a kernel thread */
 static void simrupt_work_func2(struct work_struct *w)
 {
-    int val, cpu;
+    int cpu, number;
+
+    mutex_lock(&baker2_lock);
+    number = baker2;
+    baker2 += 2;
+    mutex_unlock(&baker2_lock);
+    mutex_lock(&baker_serv_lock);
+    while(number != bake_serve){
+        ssleep(1);
+    }
+    bake_serve++;
+    mutex_unlock(&baker_serv_lock);
 
     /* This code runs from a kernel thread, so softirqs and hard-irqs must
      * be enabled.
@@ -226,13 +189,6 @@ static void simrupt_work_func2(struct work_struct *w)
     put_cpu();
 
     while (1) {
-        /* Consume data from the circular buffer */
-        mutex_lock(&consumer_lock);
-        val = fast_buf_get();
-        mutex_unlock(&consumer_lock);
-
-        if (val < 0)
-            break;
 
         /* Store data to the kfifo buffer */
         mutex_lock(&producer_lock);
@@ -242,14 +198,18 @@ static void simrupt_work_func2(struct work_struct *w)
         } else if (win != ' ') {
             pr_info("%c won!\n", win);
         } else {
-            pr_info("simrupt: [negamax] \n");
+         
             int move = negamax_predict(table, turn).move;
             if (move != -1) {
+                produce_data('0' + move);
                 table[move] = turn;
                 record_move(move);
+                
             }
-            produce_data('0' + move);
+            pr_info("simrupt: [negamax] %d, %c\n",move,turn);
+            
         }
+        ssleep(2);
         
         mutex_unlock(&producer_lock);
     }
@@ -282,11 +242,13 @@ static void simrupt_tasklet_func(unsigned long __data)
     WARN_ON_ONCE(!in_softirq());
 
     tv_start = ktime_get();
-    if (sel_work) {
+    if (sel_work && work_count < 20) {
         queue_work(simrupt_workqueue, &work);
+        work_count ++;
         sel_work = false;
-    } else {
+    } else if(work_count < 20){
         queue_work(simrupt_workqueue, &work2);
+        work_count ++;
         sel_work = true;
     }
     tv_end = ktime_get();
@@ -303,9 +265,6 @@ static DECLARE_TASKLET_OLD(simrupt_tasklet, simrupt_tasklet_func);
 static void process_data(void)
 {
     WARN_ON_ONCE(!irqs_disabled());
-
-    pr_info("simrupt: [CPU#%d] produce data\n", smp_processor_id());
-    fast_buf_put(update_simrupt_data());
 
     pr_info("simrupt: [CPU#%d] scheduling tasklet\n", smp_processor_id());
     tasklet_schedule(&simrupt_tasklet);
@@ -355,11 +314,24 @@ static ssize_t simrupt_read(struct file *file,
         return -ERESTARTSYS;
 
     do {
-        ret = kfifo_to_user(&rx_fifo, buf, count, &read);
+        char buffer[10];
+        ret = kfifo_out(&rx_fifo, buffer, sizeof(buffer));
+        buffer[ret] = '\0';
+        if(!ret){
+            break;
+        }
+
+        for (int i = 0; i <= ret; i++)
+        {
+            put_user(buffer[i], buf+i); 
+        }
+        break;
+        /*
         if (unlikely(ret < 0))
             break;
         if (read)
             break;
+        */
         if (file->f_flags & O_NONBLOCK) {
             ret = -EAGAIN;
             break;
@@ -373,6 +345,80 @@ static ssize_t simrupt_read(struct file *file,
 
     return ret ? ret : read;
 }
+
+static ssize_t simrupt_write(struct file *filp, const char __user *buff, 
+                            size_t len, loff_t *off) 
+{ 
+    pr_alert("Sorry, this operation is not supported.\n"); 
+    return -EINVAL; 
+} 
+
+
+/* This function is called whenever a process tries to do an ioctl on our 
+ * device file. We get two extra parameters (additional to the inode and file 
+ * structures, which all device functions get): the number of the ioctl called 
+ * and the parameter given to the ioctl function. 
+ * 
+ * If the ioctl is write or read/write (meaning output is returned to the 
+ * calling process), the ioctl call returns the output of this function. 
+ */ 
+static long 
+device_ioctl(struct file *file, /* ditto */ 
+             unsigned int ioctl_num, /* number and param for ioctl */ 
+             unsigned long ioctl_param) 
+{ 
+    int i; 
+    long ret = SUCCESS; 
+ 
+    /* We don't want to talk to two processes at the same time. */ 
+    if (atomic_cmpxchg(&already_open, CDEV_NOT_USED, CDEV_EXCLUSIVE_OPEN)) 
+        return -EBUSY; 
+ 
+    /* Switch according to the ioctl called */ 
+    switch (ioctl_num) { 
+    case IOCTL_SET_MSG: { 
+        /* Receive a pointer to a message (in user space) and set that to 
+         * be the device's message. Get the parameter given to ioctl by 
+         * the process. 
+         */ 
+        char __user *tmp = (char __user *)ioctl_param; 
+        char ch; 
+ 
+        /* Find the length of the message */ 
+        get_user(ch, tmp); 
+        for (i = 0; ch && i < BUF_LEN; i++, tmp++) 
+            get_user(ch, tmp); 
+ 
+        // device_write(file, (char __user *)ioctl_param, i, NULL); 
+        break; 
+    } 
+    case IOCTL_GET_MSG: { 
+        loff_t offset = 0; 
+ 
+        /* Give the current message to the calling process - the parameter 
+         * we got is a pointer, fill it. 
+         */ 
+        i = simrupt_read(file, (char __user *)ioctl_param, 10, &offset); 
+        
+        /* Put a zero at the end of the buffer, so it will be properly 
+         * terminated. 
+         */ 
+        put_user('\0', (char __user *)ioctl_param + i + 1); 
+        break; 
+    } 
+    case IOCTL_GET_NTH_BYTE: 
+        /* This ioctl is both input (ioctl_param) and output (the return 
+         * value of this function). 
+         */ 
+        ret = (long)message[ioctl_param]; 
+        break; 
+    } 
+ 
+    /* We're now ready for our next caller */ 
+    atomic_set(&already_open, CDEV_NOT_USED); 
+ 
+    return ret; 
+} 
 
 static atomic_t open_cnt;
 
@@ -392,7 +438,6 @@ static int simrupt_release(struct inode *inode, struct file *filp)
     if (atomic_dec_and_test(&open_cnt) == 0) {
         del_timer_sync(&timer);
         flush_workqueue(simrupt_workqueue);
-        fast_buf_clear();
     }
     pr_info("release, current cnt: %d\n", atomic_read(&open_cnt));
 
@@ -401,6 +446,8 @@ static int simrupt_release(struct inode *inode, struct file *filp)
 
 static const struct file_operations simrupt_fops = {
     .read = simrupt_read,
+    .write = simrupt_write,
+    .unlocked_ioctl = device_ioctl, 
     .llseek = no_llseek,
     .open = simrupt_open,
     .release = simrupt_release,
@@ -444,19 +491,9 @@ static int __init simrupt_init(void)
     /* Register the device with sysfs */
     device_create(simrupt_class, NULL, MKDEV(major, 0), NULL, DEV_NAME);
 
-    /* Allocate fast circular buffer */
-    fast_buf.buf = vmalloc(PAGE_SIZE);
-    if (!fast_buf.buf) {
-        device_destroy(simrupt_class, dev_id);
-        class_destroy(simrupt_class);
-        ret = -ENOMEM;
-        goto error_cdev;
-    }
-
     /* Create the workqueue */
     simrupt_workqueue = alloc_workqueue("simruptd", WQ_UNBOUND, WQ_MAX_ACTIVE);
     if (!simrupt_workqueue) {
-        vfree(fast_buf.buf);
         device_destroy(simrupt_class, dev_id);
         class_destroy(simrupt_class);
         ret = -ENOMEM;
@@ -491,7 +528,6 @@ static void __exit simrupt_exit(void)
     tasklet_kill(&simrupt_tasklet);
     flush_workqueue(simrupt_workqueue);
     destroy_workqueue(simrupt_workqueue);
-    vfree(fast_buf.buf);
     device_destroy(simrupt_class, dev_id);
     class_destroy(simrupt_class);
     cdev_del(&simrupt_cdev);

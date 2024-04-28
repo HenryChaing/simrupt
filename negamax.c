@@ -31,12 +31,9 @@ static int cmp_moves(const void *a, const void *b)
     return score_b - score_a;
 }
 
-static int i = 0;
-
 static move_t negamax(char *table, int depth, char player, int alpha, int beta)
 {
     
-    pr_info("count: %d",i);
     if (check_win(table) != ' ' || depth == 0) {
         move_t result = {get_score(table, player), -1};
         return result;
