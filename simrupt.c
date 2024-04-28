@@ -53,9 +53,7 @@ static int move_count = 0;
 static char table[N_GRIDS];
 static char turn = 'X';
 static char ai = 'O';
-static int baker1 = 1;
-static int baker2 = 2;
-static int bake_serve = 1;
+
 
 /*ttt game static method*/
 static void record_move(int move)
@@ -98,25 +96,13 @@ static void produce_data(unsigned char val)
 
 /* Mutex to serialize kfifo writers within the workqueue handler */
 static DEFINE_MUTEX(producer_lock);
-static DEFINE_MUTEX(baker1_lock);
-static DEFINE_MUTEX(baker2_lock);
-static DEFINE_MUTEX(baker_serv_lock);
+static DEFINE_MUTEX(work1_lock);
+static DEFINE_MUTEX(work2_lock);
 
 /* Workqueue handler: executed by a kernel thread */
 static void simrupt_work_func(struct work_struct *w)
 {
-    int cpu, number;
-
-    mutex_lock(&baker1_lock);
-    number = baker1;
-    baker1 += 2;
-    mutex_unlock(&baker1_lock);
-    mutex_lock(&baker_serv_lock);
-    while(number != bake_serve){
-        ssleep(1);
-    }
-    bake_serve++;
-    mutex_unlock(&baker_serv_lock);
+    int cpu;
 
     /* This code runs from a kernel thread, so softirqs and hard-irqs must
      * be enabled.
@@ -124,6 +110,7 @@ static void simrupt_work_func(struct work_struct *w)
     WARN_ON_ONCE(in_softirq());
     WARN_ON_ONCE(in_interrupt());
 
+    
     /* Pretend to simulate access to per-CPU data, disabling preemption
      * during the pr_info().
      */
@@ -132,7 +119,7 @@ static void simrupt_work_func(struct work_struct *w)
     put_cpu();
 
     while (1) {
-
+        mutex_lock(&work1_lock);
         /* Store data to the kfifo buffer */
         mutex_lock(&producer_lock);
         char win = check_win(table);
@@ -155,25 +142,16 @@ static void simrupt_work_func(struct work_struct *w)
         ssleep(2);
         
         mutex_unlock(&producer_lock);
+        mutex_unlock(&work2_lock);
     }
+    
     wake_up_interruptible(&rx_wait);
 }
 
 /* Workqueue handler: executed by a kernel thread */
 static void simrupt_work_func2(struct work_struct *w)
 {
-    int cpu, number;
-
-    mutex_lock(&baker2_lock);
-    number = baker2;
-    baker2 += 2;
-    mutex_unlock(&baker2_lock);
-    mutex_lock(&baker_serv_lock);
-    while(number != bake_serve){
-        ssleep(1);
-    }
-    bake_serve++;
-    mutex_unlock(&baker_serv_lock);
+    int cpu;
 
     /* This code runs from a kernel thread, so softirqs and hard-irqs must
      * be enabled.
@@ -181,6 +159,7 @@ static void simrupt_work_func2(struct work_struct *w)
     WARN_ON_ONCE(in_softirq());
     WARN_ON_ONCE(in_interrupt());
 
+    
     /* Pretend to simulate access to per-CPU data, disabling preemption
      * during the pr_info().
      */
@@ -189,7 +168,7 @@ static void simrupt_work_func2(struct work_struct *w)
     put_cpu();
 
     while (1) {
-
+        mutex_lock(&work2_lock);
         /* Store data to the kfifo buffer */
         mutex_lock(&producer_lock);
         char win = check_win(table);
@@ -212,7 +191,9 @@ static void simrupt_work_func2(struct work_struct *w)
         ssleep(2);
         
         mutex_unlock(&producer_lock);
+        mutex_unlock(&work1_lock);
     }
+    
     wake_up_interruptible(&rx_wait);
 }
 
@@ -428,6 +409,7 @@ static int simrupt_open(struct inode *inode, struct file *filp)
     if (atomic_inc_return(&open_cnt) == 1)
         mod_timer(&timer, jiffies + msecs_to_jiffies(delay));
     pr_info("openm current cnt: %d\n", atomic_read(&open_cnt));
+    mutex_lock(&work2_lock);
 
     return 0;
 }
