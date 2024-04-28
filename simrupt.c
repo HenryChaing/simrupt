@@ -13,6 +13,7 @@
 
 #include "game.h"
 #include "negamax.h"
+#include "mcts.h"
 #include "util.h"
 #include "zobrist.h"
 #include "chardev.h"
@@ -178,7 +179,7 @@ static void simrupt_work_func2(struct work_struct *w)
             pr_info("%c won!\n", win);
         } else {
          
-            int move = negamax_predict(table, turn).move;
+            int move = mcts(table, turn);
             if (move != -1) {
                 produce_data('0' + move);
                 table[move] = turn;

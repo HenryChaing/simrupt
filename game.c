@@ -75,3 +75,12 @@ int *available_moves(char *table)
         moves[m] = -1;
     return moves;
 }
+
+u32 calculate_win_value(char win, char player)
+{
+    if (win == player)
+        return 65536;
+    if (win == (player ^ 'O' ^ 'X'))
+        return 0;
+    return 32768;
+}

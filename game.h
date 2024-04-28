@@ -21,3 +21,4 @@ extern const line_t lines[4];
 
 int *available_moves(char *table);
 char check_win(char *t);
+u32 calculate_win_value(char win, char player);

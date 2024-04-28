@@ -4,6 +4,7 @@ sum3-objs += game.o
 sum3-objs += mt19937-64.o
 sum3-objs += zobrist.o
 sum3-objs += negamax.o
+sum3-objs += mcts.o
 sum3-objs += $(NAME).o
 
 KDIR ?= /lib/modules/`uname -r`/build
