@@ -10,6 +10,7 @@
 #include <linux/version.h>
 #include <linux/workqueue.h>
 #include <linux/delay.h>
+#include <linux/spinlock.h> 
 
 #include "game.h"
 #include "negamax.h"
@@ -47,6 +48,7 @@ static int work_count = 0;
 static int major;
 static struct class *simrupt_class;
 static struct cdev simrupt_cdev;
+static bool pause = false;
 
 /*ttt game static data*/
 static int move_record[N_GRIDS];
@@ -99,6 +101,7 @@ static void produce_data(unsigned char val)
 static DEFINE_MUTEX(producer_lock);
 static DEFINE_MUTEX(work1_lock);
 static DEFINE_MUTEX(work2_lock);
+static DEFINE_MUTEX(process_lock);
 
 /* Workqueue handler: executed by a kernel thread */
 static void simrupt_work_func(struct work_struct *w)
@@ -123,6 +126,7 @@ static void simrupt_work_func(struct work_struct *w)
         mutex_lock(&work1_lock);
         /* Store data to the kfifo buffer */
         mutex_lock(&producer_lock);
+        mutex_lock(&process_lock);
         char win = check_win(table);
         if (win == 'D') {
             pr_info("It is a draw!\n");
@@ -140,6 +144,7 @@ static void simrupt_work_func(struct work_struct *w)
             pr_info("simrupt: [negamax] %d, %c\n",move,ai);
             
         }
+        mutex_unlock(&process_lock);
         ssleep(2);
         
         mutex_unlock(&producer_lock);
@@ -172,6 +177,7 @@ static void simrupt_work_func2(struct work_struct *w)
         mutex_lock(&work2_lock);
         /* Store data to the kfifo buffer */
         mutex_lock(&producer_lock);
+        mutex_lock(&process_lock);
         char win = check_win(table);
         if (win == 'D') {
             pr_info("It is a draw!\n");
@@ -189,6 +195,7 @@ static void simrupt_work_func2(struct work_struct *w)
             pr_info("simrupt: [negamax] %d, %c\n",move,turn);
             
         }
+        mutex_unlock(&process_lock);
         ssleep(2);
         
         mutex_unlock(&producer_lock);
@@ -328,11 +335,25 @@ static ssize_t simrupt_read(struct file *file,
     return ret ? ret : read;
 }
 
-static ssize_t simrupt_write(struct file *filp, const char __user *buff, 
-                            size_t len, loff_t *off) 
+static ssize_t simrupt_write(struct file *file, const char __user *buffer, 
+                            size_t length, loff_t *offset) 
 { 
-    pr_alert("Sorry, this operation is not supported.\n"); 
-    return -EINVAL; 
+    int i; 
+ 
+    pr_info("device_write(%p,%p,%ld)", file, buffer, length); 
+ 
+    for (i = 0; i < length && i < BUF_LEN; i++) 
+        get_user(message[i], buffer + i); 
+ 
+    if(message[0] == 'p' && !pause){
+        mutex_lock(&process_lock);
+        pause = true;
+    } else if (message[0] == 'p' && pause){
+        mutex_unlock(&process_lock);
+        pause = false;
+    }
+
+    return i;
 } 
 
 
@@ -364,14 +385,13 @@ device_ioctl(struct file *file, /* ditto */
          * the process. 
          */ 
         char __user *tmp = (char __user *)ioctl_param; 
-        char ch; 
+        char ch = 'A'; 
  
-        /* Find the length of the message */ 
-        get_user(ch, tmp); 
+        /* Find the length of the message */  
         for (i = 0; ch && i < BUF_LEN; i++, tmp++) 
             get_user(ch, tmp); 
  
-        // device_write(file, (char __user *)ioctl_param, i, NULL); 
+        simrupt_write(file, (char __user *)ioctl_param, i, NULL); 
         break; 
     } 
     case IOCTL_GET_MSG: { 
@@ -476,6 +496,11 @@ static int __init simrupt_init(void)
 
     /* Create the workqueue */
     simrupt_workqueue = alloc_workqueue("simruptd", WQ_UNBOUND, WQ_MAX_ACTIVE);
+    // struct workqueue_attrs attrs;
+	// BUG_ON(!(attrs = alloc_workqueue_attrs()));
+	// attrs->nice = std_nice[i];
+
+    // simrupt_workqueue2 = alloc_workqueue("simruptd", WQ_UNBOUND, WQ_MAX_ACTIVE);
     if (!simrupt_workqueue) {
         device_destroy(simrupt_class, dev_id);
         class_destroy(simrupt_class);
